@@ -1,0 +1,50 @@
+name: hakikisha
+description: "Hakikisha — medicine authenticity verification."
+publish_to: 'none'
+version: 0.1.0+1
+
+environment:
+  sdk: ^3.13.5
+
+dependencies:
+  cloud_firestore: ^7.1.0
+  firebase_auth: ^7.0.1
+  firebase_core: ^5.1.0
+  flutter:
+    sdk: flutter
+  flutter_map: ^8.3.2
+  flutter_riverpod: ^3.4.3
+  geolocator: ^14.1.1
+  go_router: ^18.0.2
+  image_picker: ^1.2.4
+  latlong2: ^0.10.1
+  mobile_scanner: ^7.4.2
+  url_launcher: ^6.3.3
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+  flutter_launcher_icons: ^0.14.4
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/images/
+    - assets/medicines/
+
+# Launcher icons, generated from the logo: `dart run flutter_launcher_icons`
+flutter_launcher_icons:
+  image_path: assets/images/hakikisha-logo.png
+  android: true
+  ios: true
+  remove_alpha_ios: true
+  background_color_ios: "#FFFFFF"
+  adaptive_icon_background: "#FFFFFF"
+  adaptive_icon_foreground: assets/images/hakikisha-logo.png
+  adaptive_icon_foreground_inset: 16
+  web:
+    generate: true
+    image_path: assets/images/hakikisha-logo.png
+    background_color: "#FFFFFF"
+    theme_color: "#166534"

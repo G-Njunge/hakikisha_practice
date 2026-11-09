@@ -1,0 +1,77 @@
+# .github/workflows/ci.yml
+name: Hakikisha CI
+
+on:
+  push:
+    branches: ["**"]        # runs on every branch push
+  
+jobs:
+  mobile:
+    name: Mobile — Analyze, Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.47.6
+          cache: true
+
+      - name: Install dependencies
+        run: flutter pub get
+        working-directory: mobile
+
+      - name: Analyze
+        run: flutter analyze
+        working-directory: mobile
+
+      - name: Run tests
+        run: flutter test
+        working-directory: mobile
+
+  firebase:
+    name: Firebase — Typecheck, Rules & Smoke Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: firebase/package-lock.json
+
+      # The Firestore emulator runs on Java.
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Install Firebase CLI
+        run: npm install -g firebase-tools
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: firebase
+
+      - name: Typecheck scripts and tests
+        run: npm run typecheck
+        working-directory: firebase
+
+      - name: Test security rules
+        run: npm run test:rules
+        working-directory: firebase
+
+      # Seeds the emulator and checks the data, including that every photo a
+      # medicine references is bundled in mobile/assets/medicines.
+      - name: Smoke test
+        run: npm run test:e2e
+        working-directory: firebase

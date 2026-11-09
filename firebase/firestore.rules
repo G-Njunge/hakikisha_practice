@@ -1,0 +1,169 @@
+rules_version = '2';
+
+// The app talks to Firestore directly (on the free Spark plan there's no
+// server code), so these rules are the backend's access control and input
+// validation. Reference data (medicines,
+// pharmacies, health authorities) is written only by the seed/admin scripts,
+// which use the Admin SDK and bypass these rules.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    // Set by scripts/set-admin.ts as a custom claim, so it can't be granted
+    // by editing a document.
+    function isAdmin() {
+      return signedIn() && request.auth.token.get('admin', false) == true;
+    }
+
+    function isOwner(uid) {
+      return signedIn() && request.auth.uid == uid;
+    }
+
+    function isShortString(value, minLength, maxLength) {
+      return value is string && value.size() >= minLength && value.size() <= maxLength;
+    }
+
+    function isOptionalString(value, maxLength) {
+      return value == null || isShortString(value, 0, maxLength);
+    }
+
+    // --- Public reference data ---------------------------------------------
+
+    match /medicines/{barcode} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    match /pharmacies/{pharmacyId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // Regulator contact addresses. Admins read them to email a regulator
+    // about a report (there's no server to do it on the free plan).
+    match /healthAuthorities/{country} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+
+    // --- Accounts ----------------------------------------------------------
+
+    match /users/{uid} {
+      allow read: if isOwner(uid) || isAdmin();
+
+      // Written by the app right after sign-up. Admin can't be self-assigned:
+      // the role is display-only, and real admin access is the custom claim.
+      allow create: if isOwner(uid)
+        && request.resource.data.keys().hasOnly(['fullName', 'email', 'country', 'role', 'createdAt'])
+        && isShortString(request.resource.data.fullName, 1, 100)
+        && request.resource.data.email == request.auth.token.email
+        && request.resource.data.country in ['Nigeria', 'Kenya', 'South Africa', 'Rwanda', 'Ghana', 'Uganda', 'Tanzania', 'Other']
+        && request.resource.data.role in ['consumer', 'pharmacist', 'manufacturer']
+        && request.resource.data.createdAt == request.time;
+
+      allow update: if isOwner(uid) && (
+        (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['fullName'])
+          && isShortString(request.resource.data.fullName, 1, 100))
+        // Admins record when they last opened the report queue, for the
+        // unread-reports badge.
+        || (isAdmin()
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['reportsLastViewedAt'])
+          && request.resource.data.reportsLastViewedAt == request.time)
+      );
+
+      allow delete: if false;
+    }
+
+    // --- Scans -------------------------------------------------------------
+
+    // The app looks the barcode up itself and logs the outcome. The recorded
+    // result must agree with the medicine's actual approval status, so the
+    // scan log (and admin stats built on it) can't be fed made-up results.
+    function scanResultMatchesRegistry(data) {
+      let medicinePath = /databases/$(database)/documents/medicines/$(data.barcode);
+      return exists(medicinePath)
+        ? data.medicineId == data.barcode
+          && data.result == (get(medicinePath).data.approvalStatus == 'approved' ? 'authentic' : 'unknown')
+        : data.medicineId == null && data.result == 'unknown';
+    }
+
+    match /scans/{scanId} {
+      allow read: if (signedIn() && resource.data.scannedBy == request.auth.uid) || isAdmin();
+
+      // Scanning works signed out; a signed-in scan must be attributed to
+      // the person making it.
+      allow create: if request.resource.data.keys().hasOnly(['barcode', 'medicineId', 'medicineName', 'result', 'scannedBy', 'location', 'scannedAt'])
+        && request.resource.data.barcode is string
+        && request.resource.data.barcode.matches('^[0-9]{8,13}$')
+        && request.resource.data.scannedBy == (signedIn() ? request.auth.uid : null)
+        && isOptionalString(request.resource.data.get('medicineName', null), 200)
+        && (request.resource.data.get('location', null) == null || request.resource.data.location is latlng)
+        && request.resource.data.scannedAt == request.time
+        && scanResultMatchesRegistry(request.resource.data);
+
+      allow update, delete: if false;
+    }
+
+    // --- Counterfeit reports -----------------------------------------------
+
+    function reportPhotoPath(reportId) {
+      return /databases/$(database)/documents/reportPhotos/$(reportId);
+    }
+
+    function isValidNewReport(reportId, data) {
+      return data.keys().hasOnly(['scanId', 'productName', 'medicineName', 'description', 'country', 'purchaseLocation', 'hasPhoto', 'status', 'reportedBy', 'createdAt', 'updatedAt'])
+        && data.reportedBy == request.auth.uid
+        && data.status == 'pending'
+        && data.createdAt == request.time
+        && data.updatedAt == request.time
+        && isShortString(data.description, 1, 5000)
+        && data.country in ['Nigeria', 'Kenya', 'South Africa', 'Rwanda', 'Ghana']
+        && isOptionalString(data.get('scanId', null), 100)
+        && isOptionalString(data.get('productName', null), 200)
+        && isOptionalString(data.get('medicineName', null), 200)
+        && isOptionalString(data.get('purchaseLocation', null), 500)
+        // Must say what product it's about, one way or another.
+        && (data.get('scanId', null) != null || data.get('productName', '') != '')
+        // A report with a photo is written in the same batch as its photo.
+        && data.hasPhoto is bool
+        && data.hasPhoto == existsAfter(reportPhotoPath(reportId));
+    }
+
+    match /reports/{reportId} {
+      allow read: if (signedIn() && resource.data.reportedBy == request.auth.uid) || isAdmin();
+      allow create: if signedIn() && isValidNewReport(reportId, request.resource.data);
+
+      // Admins work the queue: status, notes, and recording that they've
+      // emailed the regulator.
+      allow update: if isAdmin()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'adminNotes', 'resolvedBy', 'resolvedAt', 'regulatorNotifiedAt', 'updatedAt'])
+        && request.resource.data.status in ['pending', 'investigating', 'escalated', 'resolved', 'dismissed']
+        && isOptionalString(request.resource.data.get('adminNotes', null), 5000)
+        && request.resource.data.updatedAt == request.time;
+
+      allow delete: if false;
+    }
+
+    // Evidence photo for a report, as a base64 JPEG (Cloud Storage isn't on
+    // the free plan). Kept apart from the report so listing reports doesn't
+    // download every photo. Only creatable in the same batch as its report.
+    match /reportPhotos/{reportId} {
+      allow read: if (signedIn() && resource.data.reportedBy == request.auth.uid) || isAdmin();
+
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly(['reportedBy', 'contentType', 'data', 'createdAt'])
+        && request.resource.data.reportedBy == request.auth.uid
+        && request.resource.data.contentType is string
+        && request.resource.data.contentType.matches('image/.*')
+        // Firestore documents max out at 1 MiB; this leaves headroom.
+        && isShortString(request.resource.data.data, 1, 900000)
+        && request.resource.data.createdAt == request.time
+        && getAfter(/databases/$(database)/documents/reports/$(reportId)).data.reportedBy == request.auth.uid;
+
+      allow update, delete: if false;
+    }
+  }
+}
